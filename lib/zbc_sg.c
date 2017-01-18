@@ -468,7 +468,12 @@ zbc_sg_cmd_exec(zbc_device_t *dev,
               (unsigned int)zbc_sg_cmd_driver_flags(cmd));
 
     /* Check status */
-    if ( ((cmd->code == ZBC_SG_ATA12) || (cmd->code == ZBC_SG_ATA16))
+// This code was modified by BlueArchive - Mark Rees
+// The ATTO esas4hba driver does not return cmd->io_hdr.status == ZBC_SG_CHECK_CONDITION
+// from the "ATA Classify" command (see zbc_ata_classify() in zbc_ata.c).
+//
+//    if ( ((cmd->code == ZBC_SG_ATA12) || (cmd->code == ZBC_SG_ATA16))
+      if ( (cmd->code == ZBC_SG_ATA12)
          && (cmd->cdb[2] & (1 << 5)) ) {
 
        /* ATA command status */
