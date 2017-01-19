@@ -468,31 +468,31 @@ zbc_sg_cmd_exec(zbc_device_t *dev,
               (unsigned int)zbc_sg_cmd_driver_flags(cmd));
 
     /* Check status */
+    if ( ((cmd->code == ZBC_SG_ATA12) || (cmd->code == ZBC_SG_ATA16))
+         && (cmd->cdb[2] & (1 << 5)) ) {
+
 // This code was modified by BlueArchive - Mark Rees
 // The ATTO esas4hba driver does not return cmd->io_hdr.status == ZBC_SG_CHECK_CONDITION
 // from the "ATA Classify" command (see zbc_ata_classify() in zbc_ata.c).
-//
-//    if ( ((cmd->code == ZBC_SG_ATA12) || (cmd->code == ZBC_SG_ATA16))
-      if ( (cmd->code == ZBC_SG_ATA12)
-         && (cmd->cdb[2] & (1 << 5)) ) {
 
-       /* ATA command status */
-       if ( cmd->io_hdr.status != ZBC_SG_CHECK_CONDITION ) {
-           zbc_sg_set_sense(dev, cmd->sense_buf);
-           ret = -EIO;
-           goto out;
+       if ((cmd->io_hdr.status != 0) || (cmd->code != ZBC_SG_ATA16)) {
+           /* ATA command status */
+           if ( cmd->io_hdr.status != ZBC_SG_CHECK_CONDITION ) {
+               zbc_sg_set_sense(dev, cmd->sense_buf);
+               ret = -EIO;
+               goto out;
+           }
+
+           if ( (zbc_sg_cmd_driver_status(cmd) == ZBC_SG_DRIVER_SENSE)
+                && (cmd->io_hdr.sb_len_wr > 21)
+                && (cmd->sense_buf[21] != 0x50) ) {
+               zbc_sg_set_sense(dev, cmd->sense_buf);
+               ret = -EIO;
+               goto out;
+           }
+
+           cmd->io_hdr.status = 0;
        }
-
-       if ( (zbc_sg_cmd_driver_status(cmd) == ZBC_SG_DRIVER_SENSE)
-            && (cmd->io_hdr.sb_len_wr > 21)
-            && (cmd->sense_buf[21] != 0x50) ) {
-           zbc_sg_set_sense(dev, cmd->sense_buf);
-           ret = -EIO;
-           goto out;
-       }
-
-       cmd->io_hdr.status = 0;
-
     }
 
     if ( cmd->io_hdr.status
