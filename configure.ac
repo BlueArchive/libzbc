@@ -33,7 +33,8 @@ AC_CHECK_HEADERS([linux/fs.h linux/blkzoned.h])
 # Conditionals
 
 # Build gzbc only if GTK3 is installed.
-PKG_CHECK_MODULES([GTK], [gtk+-3.0], [HAVE_GTK3=1], [HAVE_GTK3=0])
+#PKG_CHECK_MODULES([GTK], [gtk+-3.0], [HAVE_GTK3=1], [HAVE_GTK3=0])
+HAVE_GTK3=0
 AM_CONDITIONAL([BUILD_GZBC], [test "$HAVE_GTK3" -eq 1])
 
 # Build test suite
