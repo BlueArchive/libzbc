@@ -97,7 +97,7 @@ static int zbc_scsi_inquiry(struct zbc_device *dev,
  */
 static int zbc_scsi_test_sat(struct zbc_device *dev)
 {
-	size_t bufsz = ZBC_ZONE_DESCRIPTOR_OFFSET;
+	size_t bufsz = 512;
 	struct zbc_sg_cmd cmd;
 	int ret;
 
@@ -570,102 +570,6 @@ int zbc_scsi_zone_op(struct zbc_device *dev, uint64_t sector,
 }
 
 /**
- * Configure zones of a "emulated" ZBC device
- */
-static int zbc_scsi_set_zones(struct zbc_device *dev,
-			      uint64_t conv_sz, uint64_t zone_sz)
-{
-	uint64_t conv_lba = zbc_dev_sect2lba(dev, conv_sz);
-	uint64_t zone_lba = zbc_dev_sect2lba(dev, zone_sz);
-	struct zbc_sg_cmd cmd;
-	int ret;
-
-	/* Allocate and intialize set zone command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_SET_ZONES, NULL, 0);
-	if (ret != 0)
-		return ret;
-
-	/* Fill command CDB:
-	 * +=============================================================================+
-	 * |  Bit|   7    |   6    |   5    |   4    |   3    |   2    |   1    |   0    |
-	 * |Byte |        |        |        |        |        |        |        |        |
-	 * |=====+==========================+============================================|
-	 * | 0   |                           Operation Code (9Fh)                        |
-	 * |-----+-----------------------------------------------------------------------|
-	 * | 1   |      Reserved            |       Service Action (15h)                 |
-	 * |-----+-----------------------------------------------------------------------|
-	 * | 2   | (MSB)                                                                 |
-	 * |- - -+---             Conventional Zone Sise (LBA)                        ---|
-	 * | 8   |                                                                 (LSB) |
-	 * |-----+-----------------------------------------------------------------------|
-	 * | 9   | (MSB)                                                                 |
-	 * |- - -+---                   Zone Sise (LBA)                               ---|
-	 * | 15  |                                                                 (LSB) |
-	 * +=============================================================================+
-	 */
-	cmd.cdb[0] = ZBC_SG_SET_ZONES_CDB_OPCODE;
-	cmd.cdb[1] = ZBC_SG_SET_ZONES_CDB_SA;
-	zbc_sg_set_bytes(&cmd.cdb[2], &conv_lba, 7);
-	zbc_sg_set_bytes(&cmd.cdb[9], &zone_lba, 7);
-
-	/* Send the SG_IO command */
-	ret = zbc_sg_cmd_exec(dev, &cmd);
-
-	/* Cleanup */
-	zbc_sg_cmd_destroy(&cmd);
-
-	return ret;
-}
-
-/**
- * Change the value of a zone write pointer ("emulated" ZBC devices only).
- */
-static int zbc_scsi_set_write_pointer(struct zbc_device *dev,
-				      uint64_t sector, uint64_t wp_sector)
-{
-	uint64_t lba = zbc_dev_sect2lba(dev, sector);
-	uint64_t wp_lba = zbc_dev_sect2lba(dev, wp_sector);
-	struct zbc_sg_cmd cmd;
-	int ret;
-
-	/* Allocate and intialize set zone command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_SET_WRITE_POINTER, NULL, 0);
-	if (ret != 0)
-		return ret;
-
-	/* Fill command CDB:
-	 * +=============================================================================+
-	 * |  Bit|   7    |   6    |   5    |   4    |   3    |   2    |   1    |   0    |
-	 * |Byte |        |        |        |        |        |        |        |        |
-	 * |=====+==========================+============================================|
-	 * | 0   |                           Operation Code (9Fh)                        |
-	 * |-----+-----------------------------------------------------------------------|
-	 * | 1   |      Reserved            |       Service Action (16h)                 |
-	 * |-----+-----------------------------------------------------------------------|
-	 * | 2   | (MSB)                                                                 |
-	 * |- - -+---                   Start LBA                                     ---|
-	 * | 8   |                                                                 (LSB) |
-	 * |-----+-----------------------------------------------------------------------|
-	 * | 9   | (MSB)                                                                 |
-	 * |- - -+---               Write pointer LBA                                 ---|
-	 * | 15  |                                                                 (LSB) |
-	 * +=============================================================================+
-	 */
-	cmd.cdb[0] = ZBC_SG_SET_WRITE_POINTER_CDB_OPCODE;
-	cmd.cdb[1] = ZBC_SG_SET_WRITE_POINTER_CDB_SA;
-	zbc_sg_set_bytes(&cmd.cdb[2], &lba, 7);
-	zbc_sg_set_bytes(&cmd.cdb[9], &wp_lba, 7);
-
-	/* Send the SG_IO command */
-	ret = zbc_sg_cmd_exec(dev, &cmd);
-
-	/* Cleanup */
-	zbc_sg_cmd_destroy(&cmd);
-
-	return ret;
-}
-
-/**
  * Get a device capacity information (total sectors & sector sizes).
  */
 static int zbc_scsi_get_capacity(struct zbc_device *dev)
@@ -853,7 +757,7 @@ static int zbc_scsi_open(const char *filename,
 		  filename);
 
 	/* Open the device file */
-	fd = open(filename, flags);
+	fd = open(filename, flags & ZBC_O_MODE_MASK);
 	if (fd < 0) {
 		ret = -errno;
 		zbc_error("%s: Open device file failed %d (%s)\n",
@@ -885,6 +789,9 @@ static int zbc_scsi_open(const char *filename,
 
 	dev->zbd_fd = fd;
 	dev->zbd_sg_fd = fd;
+#ifdef HAVE_DEVTEST
+	dev->zbd_flags = flags & ZBC_O_DEVTEST;
+#endif
 	dev->zbd_filename = strdup(filename);
 	if (!dev->zbd_filename)
 		goto out_free_dev;
@@ -935,8 +842,8 @@ static int zbc_scsi_close(struct zbc_device *dev)
 /**
  * Read from a ZBC device
  */
-static ssize_t zbc_scsi_pread(struct zbc_device *dev, void *buf,
-			      size_t count, uint64_t offset)
+ssize_t zbc_scsi_pread(struct zbc_device *dev, void *buf,
+		       size_t count, uint64_t offset)
 {
 	size_t sz = count << 9;
 	struct zbc_sg_cmd cmd;
@@ -966,8 +873,8 @@ static ssize_t zbc_scsi_pread(struct zbc_device *dev, void *buf,
 /**
  * Write to a ZBC device
  */
-static ssize_t zbc_scsi_pwrite(struct zbc_device *dev, const void *buf,
-			       size_t count, uint64_t offset)
+ssize_t zbc_scsi_pwrite(struct zbc_device *dev, const void *buf,
+			size_t count, uint64_t offset)
 {
 	size_t sz = count << 9;
 	struct zbc_sg_cmd cmd;
@@ -997,7 +904,7 @@ static ssize_t zbc_scsi_pwrite(struct zbc_device *dev, const void *buf,
 /**
  * Flush a ZBC device cache.
  */
-static int zbc_scsi_flush(struct zbc_device *dev)
+int zbc_scsi_flush(struct zbc_device *dev)
 {
 	struct zbc_sg_cmd cmd;
 	int ret;
@@ -1022,10 +929,11 @@ static int zbc_scsi_flush(struct zbc_device *dev)
 }
 
 /**
- * ZBC with SCSI I/O device operations.
+ * ZBC SCSI device driver definition.
  */
-struct zbc_ops zbc_scsi_ops =
+struct zbc_drv zbc_scsi_drv =
 {
+	.flag			= ZBC_O_DRV_SCSI,
 	.zbd_open		= zbc_scsi_open,
 	.zbd_close		= zbc_scsi_close,
 	.zbd_pread		= zbc_scsi_pread,
@@ -1033,7 +941,5 @@ struct zbc_ops zbc_scsi_ops =
 	.zbd_flush		= zbc_scsi_flush,
 	.zbd_report_zones	= zbc_scsi_report_zones,
 	.zbd_zone_op		= zbc_scsi_zone_op,
-	.zbd_set_zones		= zbc_scsi_set_zones,
-	.zbd_set_wp		= zbc_scsi_set_write_pointer,
 };
 

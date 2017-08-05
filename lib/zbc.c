@@ -26,11 +26,11 @@ int zbc_log_level = ZBC_LOG_WARNING;
 /*
  * Backend drivers.
  */
-static struct zbc_ops *zbc_ops[] = {
-	&zbc_block_ops,
-	&zbc_scsi_ops,
-	&zbc_ata_ops,
-	&zbc_fake_ops,
+static struct zbc_drv *zbc_drv[] = {
+	&zbc_block_drv,
+	&zbc_scsi_drv,
+	&zbc_ata_drv,
+	&zbc_fake_drv,
 	NULL
 };
 
@@ -266,19 +266,19 @@ int zbc_device_is_zoned(const char *filename,
 	int ret = -ENODEV, i;
 
 	/* Test all backends until one accepts the drive. */
-	for (i = 0; zbc_ops[i]; i++) {
-		ret = zbc_ops[i]->zbd_open(filename, O_RDONLY, &dev);
+	for (i = 0; zbc_drv[i]; i++) {
+		ret = zbc_drv[i]->zbd_open(filename, O_RDONLY, &dev);
 		if (ret == 0) {
 			/* This backend accepted the device */
-			dev->zbd_ops = zbc_ops[i];
+			dev->zbd_drv = zbc_drv[i];
 			break;
 		}
 		if (ret != -ENXIO)
 			return ret;
 	}
 
-	if (dev && dev->zbd_ops) {
-		if (dev->zbd_ops == &zbc_fake_ops && !fake) {
+	if (dev && dev->zbd_drv) {
+		if (dev->zbd_drv == &zbc_fake_drv && !fake) {
 			ret = 0;
 		} else {
 			ret = 1;
@@ -286,7 +286,7 @@ int zbc_device_is_zoned(const char *filename,
 				memcpy(info, &dev->zbd_info,
 				       sizeof(struct zbc_device_info));
 		}
-		dev->zbd_ops->zbd_close(dev);
+		dev->zbd_drv->zbd_close(dev);
 	} else {
 		if ((ret != -EPERM) && (ret != -EACCES))
 			ret = 0;
@@ -301,15 +301,27 @@ int zbc_device_is_zoned(const char *filename,
 int zbc_open(const char *filename, int flags, struct zbc_device **pdev)
 {
 	struct zbc_device *dev = NULL;
+	unsigned int allowed_drv;
 	int ret, i;
 
+	allowed_drv = flags & ZBC_O_DRV_MASK;
+	if (!allowed_drv)
+		allowed_drv = ZBC_O_DRV_MASK;
+#ifndef HAVE_LINUX_BLKZONED_H
+	allowed_drv &= ~ZBC_O_DRV_BLOCK;
+#endif
+
 	/* Test all backends until one accepts the drive */
-	for (i = 0; zbc_ops[i] != NULL; i++) {
-		ret = zbc_ops[i]->zbd_open(filename, flags, &dev);
+	for (i = 0; zbc_drv[i] != NULL; i++) {
+
+		if (!(zbc_drv[i]->flag & allowed_drv))
+			continue;
+
+		ret = zbc_drv[i]->zbd_open(filename, flags, &dev);
 		switch (ret) {
 		case 0:
 			/* This backend accepted the drive */
-			dev->zbd_ops = zbc_ops[i];
+			dev->zbd_drv = zbc_drv[i];
 			*pdev = dev;
 			return 0;
 		case -ENXIO:
@@ -317,6 +329,7 @@ int zbc_open(const char *filename, int flags, struct zbc_device **pdev)
 		default:
 			return ret;
 		}
+
 	}
 
 	return -ENODEV;
@@ -327,7 +340,7 @@ int zbc_open(const char *filename, int flags, struct zbc_device **pdev)
  */
 int zbc_close(struct zbc_device *dev)
 {
-	return dev->zbd_ops->zbd_close(dev);
+	return dev->zbd_drv->zbd_close(dev);
 }
 
 /**
@@ -407,7 +420,7 @@ int zbc_report_zones(struct zbc_device *dev, uint64_t sector,
 
 	if (!zones)
 		/* Get the number of zones */
-		return (dev->zbd_ops->zbd_report_zones)(dev, sector,
+		return (dev->zbd_drv->zbd_report_zones)(dev, sector,
 							zbc_ro_mask(ro),
 							NULL, nr_zones);
 
@@ -415,11 +428,12 @@ int zbc_report_zones(struct zbc_device *dev, uint64_t sector,
         while (nz < *nr_zones) {
 
 		n = *nr_zones - nz;
-		ret = (dev->zbd_ops->zbd_report_zones)(dev, sector,
+		ret = (dev->zbd_drv->zbd_report_zones)(dev, sector,
 					zbc_ro_mask(ro) | ZBC_RO_PARTIAL,
 					&zones[nz], &n);
 		if (ret != 0) {
-			zbc_error("Get zones from LBA %llu failed %d (%s)\n",
+			zbc_error("%s: Get zones from LBA %llu failed %d (%s)\n",
+				  dev->zbd_filename,
 				  (unsigned long long) sector,
 				  ret, strerror(-ret));
 			return ret;
@@ -460,21 +474,20 @@ int zbc_list_zones(struct zbc_device *dev, uint64_t sector,
 	if (ret < 0)
 		return ret;
 
-	zbc_debug("Device %s: %d zones\n",
+	zbc_debug("%s: %d zones\n",
 		  dev->zbd_filename,
 		  nr_zones);
 
 	/* Allocate zone array */
 	zones = (struct zbc_zone *) calloc(nr_zones, sizeof(struct zbc_zone));
-	if (!zones) {
-		zbc_error("No memory\n");
+	if (!zones)
 		return -ENOMEM;
-	}
 
 	/* Get zones information */
 	ret = zbc_report_zones(dev, sector, zbc_ro_mask(ro), zones, &nr_zones);
 	if (ret != 0) {
-		zbc_error("zbc_report_zones failed %d\n", ret);
+		zbc_error("%s: zbc_report_zones failed %d\n",
+			  dev->zbd_filename, ret);
 		free(zones);
 		return ret;
 	}
@@ -498,7 +511,7 @@ int zbc_zone_operation(struct zbc_device *dev, uint64_t sector,
 		return -EINVAL;
 
 	/* Execute the operation */
-	return (dev->zbd_ops->zbd_zone_op)(dev, sector, op, flags);
+	return (dev->zbd_drv->zbd_zone_op)(dev, sector, op, flags);
 }
 
 /**
@@ -511,13 +524,11 @@ ssize_t zbc_pread(struct zbc_device *dev, void *buf,
 	size_t sz, rd_count = 0;
 	ssize_t ret;
 
-	zbc_debug("Read %zu sectors at sector %llu\n",
-		  count, (unsigned long long) offset);
-
 	if (!zbc_test_mode(dev)) {
 		if (!zbc_dev_sect_laligned(dev, count) ||
 		    !zbc_dev_sect_laligned(dev, offset)) {
-			zbc_error("Unaligned read %zu sectors at sector %llu\n",
+			zbc_error("%s: Unaligned read %zu sectors at sector %llu\n",
+				  dev->zbd_filename,
 				  count, (unsigned long long) offset);
 			return -EINVAL;
 		}
@@ -529,6 +540,10 @@ ssize_t zbc_pread(struct zbc_device *dev, void *buf,
 	    offset >= dev->zbd_info.zbd_sectors)
 		return 0;
 
+	zbc_debug("%s: Read %zu sectors at sector %llu\n",
+		  dev->zbd_filename,
+		  count, (unsigned long long) offset);
+
 	while (count) {
 
 		if (count > max_count)
@@ -536,20 +551,19 @@ ssize_t zbc_pread(struct zbc_device *dev, void *buf,
 		else
 			sz = count;
 
-		zbc_debug("  Read %zu sectors at sector %llu\n",
-			  sz, (unsigned long long) offset);
-
-		ret = (dev->zbd_ops->zbd_pread)(dev, buf, sz, offset);
+		ret = (dev->zbd_drv->zbd_pread)(dev, buf, sz, offset);
 		if (ret <= 0) {
-			zbc_error("Read %zu sectors at sector %llu failed %zd (%s)\n",
+			zbc_error("%s: Read %zu sectors at sector %llu failed %zd (%s)\n",
+				  dev->zbd_filename,
 				  sz, (unsigned long long) offset,
 				  -ret, strerror(-ret));
 			return ret ? ret : -EIO;
 		}
 
+		buf += ret << 9;
 		offset += ret;
-		count -=ret;
-		rd_count +=ret;
+		count -= ret;
+		rd_count += ret;
 
 	}
 
@@ -569,7 +583,8 @@ ssize_t zbc_pwrite(struct zbc_device *dev, const void *buf,
 	if (!zbc_test_mode(dev)) {
 		if (!zbc_dev_sect_paligned(dev, count) ||
 		    !zbc_dev_sect_paligned(dev, offset)) {
-			zbc_error("Unaligned write %zu sectors at sector %llu\n",
+			zbc_error("%s: Unaligned write %zu sectors at sector %llu\n",
+				  dev->zbd_filename,
 				  count, (unsigned long long) offset);
 			return -EINVAL;
 		}
@@ -581,6 +596,10 @@ ssize_t zbc_pwrite(struct zbc_device *dev, const void *buf,
 	    offset >= dev->zbd_info.zbd_sectors)
 		return 0;
 
+	zbc_debug("%s: Write %zu sectors at sector %llu\n",
+		  dev->zbd_filename,
+		  count, (unsigned long long) offset);
+
 	while (count) {
 
 		if (count > max_count)
@@ -588,20 +607,19 @@ ssize_t zbc_pwrite(struct zbc_device *dev, const void *buf,
 		else
 			sz = count;
 
-		zbc_debug("Write %zu sectors at sector %llu\n",
-			  sz, (unsigned long long) offset);
-
-		ret = (dev->zbd_ops->zbd_pwrite)(dev, buf, sz, offset);
+		ret = (dev->zbd_drv->zbd_pwrite)(dev, buf, sz, offset);
 		if (ret <= 0) {
-			zbc_error("Write %zu sectors at sector %llu failed %zd (%s)\n",
+			zbc_error("%s: Write %zu sectors at sector %llu failed %zd (%s)\n",
+				  dev->zbd_filename,
 				  sz, (unsigned long long) offset,
 				  -ret, strerror(-ret));
 			return ret ? ret : -EIO;
 		}
 
+		buf += ret << 9;
 		offset += ret;
-		count -=ret;
-		wr_count +=ret;
+		count -= ret;
+		wr_count += ret;
 
 	}
 
@@ -613,7 +631,7 @@ ssize_t zbc_pwrite(struct zbc_device *dev, const void *buf,
  */
 int zbc_flush(struct zbc_device *dev)
 {
-	return (dev->zbd_ops->zbd_flush)(dev);
+	return (dev->zbd_drv->zbd_flush)(dev);
 }
 
 /**
@@ -624,42 +642,31 @@ int zbc_set_zones(struct zbc_device *dev,
 {
 
 	/* Do this only if supported */
-	if (!dev->zbd_ops->zbd_set_zones)
+	if (!dev->zbd_drv->zbd_set_zones)
 		return -ENXIO;
 
 	if (!zbc_dev_sect_paligned(dev, conv_sz) ||
 	    !zbc_dev_sect_paligned(dev, zone_sz))
 		return -EINVAL;
 
-	return (dev->zbd_ops->zbd_set_zones)(dev, conv_sz, zone_sz);
+	return (dev->zbd_drv->zbd_set_zones)(dev, conv_sz, zone_sz);
 }
 
 /**
  * zbc_set_write_pointer - Change the value of a zone write pointer
  */
-int
-zbc_set_write_pointer(struct zbc_device *dev,
-                      uint64_t sector,
-                      uint64_t wp_sector)
+int zbc_set_write_pointer(struct zbc_device *dev,
+			  uint64_t sector, uint64_t wp_sector)
 {
 
 	/* Do this only if supported */
-	if (!dev->zbd_ops->zbd_set_wp)
+	if (!dev->zbd_drv->zbd_set_wp)
 		return -ENXIO;
 
 	if (!zbc_dev_sect_paligned(dev, sector) ||
 	    !zbc_dev_sect_paligned(dev, wp_sector))
 		return -EINVAL;
 
-	return (dev->zbd_ops->zbd_set_wp)(dev, sector, wp_sector);
+	return (dev->zbd_drv->zbd_set_wp)(dev, sector, wp_sector);
 }
 
-#ifdef HAVE_DEVTEST
-/**
- * zbc_set_test_mode - Set library calls to test mode for the device
- */
-void zbc_set_test_mode(struct zbc_device *dev)
-{
-	dev->zbd_flags |= ZBC_DEVTEST;
-}
-#endif
