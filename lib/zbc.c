@@ -28,8 +28,8 @@ int zbc_log_level = ZBC_LOG_WARNING;
  */
 static struct zbc_drv *zbc_drv[] = {
 	&zbc_block_drv,
-	&zbc_scsi_drv,
 	&zbc_ata_drv,
+	&zbc_scsi_drv,
 	&zbc_fake_drv,
 	NULL
 };
