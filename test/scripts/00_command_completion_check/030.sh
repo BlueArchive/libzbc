@@ -12,7 +12,7 @@
 # with libzbc. If not, see  <http://opensource.org/licenses/BSD-2-Clause>.
 #
 
-. ../zbc_test_lib.sh
+. scripts/zbc_test_lib.sh
 
 zbc_test_init $0 "CLOSE_ZONE command completion" $*
 
@@ -33,7 +33,7 @@ fi
 
 # Search target LBA
 target_lba="0"
-zbc_test_search_vals_from_zone_type_and_cond ${zone_type} "0x1"
+zbc_test_get_target_zone_from_type_and_cond ${zone_type} "0x1"
 target_lba=$(( ${target_slba} ))
 
 # Start testing

@@ -113,7 +113,7 @@ static int zbc_ata_read_log(struct zbc_device *dev, uint8_t log,
 	int ret;
 
 	/* Intialize command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, buf, bufsz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, buf, bufsz);
 	if (ret != 0)
 		return ret;
 
@@ -187,7 +187,7 @@ static int zbc_ata_set_features(struct zbc_device *dev, uint8_t feature,
 	int ret;
 
 	/* Intialize command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, NULL, 0);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, NULL, 0);
 	if (ret != 0)
 		return ret;
 
@@ -266,7 +266,7 @@ static void zbc_ata_request_sense_data_ext(struct zbc_device *dev)
 	int ret;
 
 	/* Intialize command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, NULL, 0);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, NULL, 0);
 	if (ret != 0) {
 		zbc_error("%s: Get sense data zbc_sg_cmd_init failed\n",
 			  dev->zbd_filename);
@@ -353,9 +353,8 @@ static void zbc_ata_request_sense_data_ext(struct zbc_device *dev)
 	zbc_debug("%s: Additional sense code qualifier is 0x%02x\n",
 		  dev->zbd_filename, cmd.sense_buf[15]);
 
-	dev->zbd_errno.sk = cmd.sense_buf[19] & 0xF;
-	dev->zbd_errno.asc_ascq =
-			((int)cmd.sense_buf[17] << 8) | (int)cmd.sense_buf[15];
+	zbc_set_errno(cmd.sense_buf[19] & 0xF,
+		      ((int)cmd.sense_buf[17] << 8) | (int)cmd.sense_buf[15]);
 
 out:
 	zbc_sg_cmd_destroy(&cmd);
@@ -440,6 +439,7 @@ static void zbc_ata_vendor_id(struct zbc_device *dev)
 static int zbc_ata_get_zoned_device_info(struct zbc_device *dev)
 {
 	uint8_t buf[512];
+	uint32_t val;
 	int ret;
 
 	if (!zbc_dev_is_zoned(dev))
@@ -459,19 +459,45 @@ static int zbc_ata_get_zoned_device_info(struct zbc_device *dev)
 		ZBC_UNRESTRICTED_READ : 0;
 
 	/* Maximum number of zones for resource management */
-	dev->zbd_info.zbd_opt_nr_open_seq_pref =
-		zbc_ata_get_qword(&buf[24]) & 0xffffffff;
-	dev->zbd_info.zbd_opt_nr_non_seq_write_seq_pref =
-		zbc_ata_get_qword(&buf[32]) & 0xffffffff;
-	dev->zbd_info.zbd_max_nr_open_seq_req =
-		zbc_ata_get_qword(&buf[40]) & 0xffffffff;
+	if (dev->zbd_info.zbd_model == ZBC_DM_HOST_AWARE) {
 
-	if (dev->zbd_info.zbd_model == ZBC_DM_HOST_MANAGED &&
-	    dev->zbd_info.zbd_max_nr_open_seq_req <= 0) {
-		zbc_error("%s: invalid maximum number of open sequential "
-			  "write required zones for host-managed device\n",
-			  dev->zbd_filename);
-		return -EINVAL;
+		val = zbc_ata_get_qword(&buf[24]) & 0xffffffff;
+		if (!val) {
+			/* Handle this case as "not reported" */
+			zbc_warning("%s: invalid optimal number of open "
+				    "sequential write preferred zones\n",
+				    dev->zbd_filename);
+			val = ZBC_NOT_REPORTED;
+		}
+		dev->zbd_info.zbd_opt_nr_open_seq_pref = val;
+
+		val = zbc_ata_get_qword(&buf[32]) & 0xffffffff;
+		if (!val) {
+			/* Handle this case as "not reported" */
+			zbc_warning("%s: invalid optimal number of randomly "
+				    "writen sequential write preferred zones\n",
+				    dev->zbd_filename);
+			val = ZBC_NOT_REPORTED;
+		}
+		dev->zbd_info.zbd_opt_nr_non_seq_write_seq_pref = val;
+
+		dev->zbd_info.zbd_max_nr_open_seq_req = 0;
+
+	} else {
+
+		dev->zbd_info.zbd_opt_nr_open_seq_pref = 0;
+		dev->zbd_info.zbd_opt_nr_non_seq_write_seq_pref = 0;
+
+		val = zbc_ata_get_qword(&buf[40]) & 0xffffffff;
+		if (!val) {
+			/* Handle this case as "no limit" */
+			zbc_warning("%s: invalid maximum number of open "
+				    "sequential write required zones\n",
+				    dev->zbd_filename);
+			val = ZBC_NO_LIMIT;
+		}
+		dev->zbd_info.zbd_max_nr_open_seq_req = val;
+
 	}
 
 	return 0;
@@ -501,7 +527,7 @@ static ssize_t zbc_ata_native_pread(struct zbc_device *dev, void *buf,
 	}
 
 	/* Initialize the command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, buf, sz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, buf, sz);
 	if (ret != 0)
 		return ret;
 
@@ -609,7 +635,7 @@ static ssize_t zbc_ata_native_pwrite(struct zbc_device *dev, const void *buf,
 	}
 
 	/* Initialize the command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, (uint8_t *)buf, sz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, (uint8_t *)buf, sz);
 	if (ret != 0)
 		return ret;
 
@@ -705,7 +731,7 @@ static int zbc_ata_native_flush(struct zbc_device *dev)
 	int ret;
 
 	/* Initialize the command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, NULL, 0);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, NULL, 0);
 	if (ret != 0)
 		return ret;
 
@@ -760,7 +786,7 @@ static int zbc_ata_report_zones(struct zbc_device *dev, uint64_t sector,
 		bufsz = max_bufsz;
 
 	/* Allocate and intialize report zones command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, NULL, bufsz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, NULL, bufsz);
 	if (ret != 0)
 		return ret;
 
@@ -828,8 +854,8 @@ static int zbc_ata_report_zones(struct zbc_device *dev, uint64_t sector,
 		/* Get sense data if enabled */
 		if (ret == -EIO &&
 		    zbc_ata_sense_data_enabled(&cmd) &&
-		    ((dev->zbd_errno.sk != ZBC_SK_ILLEGAL_REQUEST) ||
-		     (dev->zbd_errno.asc_ascq !=
+		    ((zerrno.sk != ZBC_SK_ILLEGAL_REQUEST) ||
+		     (zerrno.asc_ascq !=
 		      ZBC_ASC_LOGICAL_BLOCK_ADDRESS_OUT_OF_RANGE)))
 			zbc_ata_request_sense_data_ext(dev);
 		goto out;
@@ -924,7 +950,7 @@ static int zbc_ata_zone_op(struct zbc_device *dev, uint64_t sector,
 	}
 
 	/* Intialize command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, NULL, 0);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, NULL, 0);
 	if (ret != 0)
 		return ret;
 
@@ -1013,7 +1039,7 @@ static int zbc_ata_classify(struct zbc_device *dev)
 	int ret;
 
 	/* Intialize command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_ATA16, NULL, 0);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_ATA16, NULL, 0);
 	if (ret != 0)
 		return ret;
 
@@ -1122,8 +1148,9 @@ static int zbc_ata_classify(struct zbc_device *dev)
 			       buf,
 			       sizeof(buf));
 	if (ret != 0) {
-		zbc_error("%s: Get supported capabilities page failed\n",
+		zbc_debug("%s: Get supported capabilities page failed\n",
 			  dev->zbd_filename);
+		ret = -ENXIO;
 		goto out;
 	}
 
@@ -1357,8 +1384,11 @@ static int zbc_ata_open(const char *filename,
 	dev->zbd_fd = fd;
 	dev->zbd_sg_fd = fd;
 #ifdef HAVE_DEVTEST
-	dev->zbd_flags = flags & ZBC_O_DEVTEST;
+	dev->zbd_o_flags = flags & ZBC_O_DEVTEST;
 #endif
+	if (flags & O_DIRECT)
+		dev->zbd_o_flags |= ZBC_O_DIRECT;
+
 	dev->zbd_filename = strdup(filename);
 	if (!dev->zbd_filename)
 		goto out_free_dev;

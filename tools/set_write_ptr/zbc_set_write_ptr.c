@@ -69,11 +69,26 @@ usage:
 
 	/* Open device */
 	path = argv[i];
-	ret = zbc_open(path, O_RDONLY, &dev);
-	if (ret != 0)
+	ret = zbc_open(path, O_RDWR | ZBC_O_DRV_FAKE, &dev);
+	if (ret != 0) {
+		if (ret == -ENODEV)
+			fprintf(stderr,
+				"Open %s failed (not a zoned block device)\n",
+				path);
+		else
+			fprintf(stderr, "Open %s failed (%s)\n",
+				path, strerror(-ret));
 		return 1;
+	}
 
 	zbc_get_device_info(dev, &info);
+	if (info.zbd_type != ZBC_DT_FAKE) {
+		fprintf(stderr,
+			"Device %s is not using the fake backend driver\n",
+			path);
+		ret = 1;
+		goto out;
+	}
 
 	printf("Device %s:\n", path);
 	zbc_print_device_info(&info, stdout);

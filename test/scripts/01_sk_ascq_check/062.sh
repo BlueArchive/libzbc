@@ -12,7 +12,7 @@
 # with libzbc. If not, see  <http://opensource.org/licenses/BSD-2-Clause>.
 #
 
-. ../zbc_test_lib.sh
+. scripts/zbc_test_lib.sh
 
 zbc_test_init $0 "READ conventional/sequential zones boundary violation" $*
 
@@ -45,10 +45,10 @@ else
     zone_type="0x2"
 fi
 
-zbc_test_search_vals_from_zone_type ${zone_type}
+zbc_test_get_target_zone_from_type ${zone_type}
 func_ret=$?
 
-if [ ${func_ret} -gt 0 -o ${next_zone_slba} != ${target_slba} ]; then
+if [[ ${func_ret} -gt 0 || ${next_zone_slba} != ${target_slba} ]]; then
     zbc_test_print_not_applicable
 fi
 

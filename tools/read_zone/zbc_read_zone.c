@@ -178,8 +178,16 @@ usage:
 
 	/* Open device */
 	ret = zbc_open(path, flags, &dev);
-	if (ret != 0)
+	if (ret != 0) {
+		if (ret == -ENODEV)
+			fprintf(stderr,
+				"Open %s failed (not a zoned block device)\n",
+				path);
+		else
+			fprintf(stderr, "Open %s failed (%s)\n",
+				path, strerror(-ret));
 		return 1;
+	}
 
 	zbc_get_device_info(dev, &info);
 
@@ -286,9 +294,7 @@ usage:
 
 	if (zbc_zone_sequential_req(iozone) &&
 	    !zbc_zone_full(iozone))
-		sector_max = zbc_zone_start(iozone) +
-			zbc_zone_length(iozone) -
-			zbc_zone_wp(iozone);
+		sector_max = zbc_zone_wp(iozone) - zbc_zone_start(iozone);
 	else
 		sector_max = zbc_zone_length(iozone);
 

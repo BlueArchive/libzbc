@@ -12,7 +12,7 @@
 # with libzbc. If not, see  <http://opensource.org/licenses/BSD-2-Clause>.
 #
 
-. ../zbc_test_lib.sh
+. scripts/zbc_test_lib.sh
 
 zbc_test_init $0 "OPEN_ZONE empty to empty (ALL bit set)" $*
 
@@ -34,7 +34,7 @@ fi
 zbc_test_get_zone_info
 
 # Search target LBA
-zbc_test_search_vals_from_zone_type_and_cond ${zone_type} "0x1"
+zbc_test_get_target_zone_from_type_and_cond ${zone_type} "0x1"
 target_lba=$(( ${target_slba} ))
 
 # Start testing
@@ -45,7 +45,7 @@ zbc_test_get_sk_ascq
 
 # Get zone information
 zbc_test_get_zone_info "1"
-zbc_test_search_vals_from_slba ${target_lba}
+zbc_test_get_target_zone_from_slba ${target_lba}
 
 # Check result
 zbc_test_check_zone_cond

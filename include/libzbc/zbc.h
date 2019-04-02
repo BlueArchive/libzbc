@@ -54,7 +54,7 @@
  * "debug"   : Verbose output decribing internally executed commands
  * The default level is "warning".
  */
-extern void zbc_set_log_level(char *log_level);
+extern void zbc_set_log_level(char const *log_level);
 
 /**
  * @brief Zone type definitions
@@ -182,6 +182,69 @@ enum zbc_zone_attributes {
 	 */
 	ZBC_ZA_NON_SEQ		= 0x0002,
 };
+
+/** @brief Get a zone type */
+#define zbc_zone_type(z)	((int)(z)->zbz_type)
+
+/** @brief Test if a zone type is conventional */
+#define zbc_zone_conventional(z) ((z)->zbz_type == ZBC_ZT_CONVENTIONAL)
+
+/** @brief Test if a zone type is sequential write required */
+#define zbc_zone_sequential_req(z) ((z)->zbz_type == ZBC_ZT_SEQUENTIAL_REQ)
+
+/** @brief Test if a zone type is sequential write preferred */
+#define zbc_zone_sequential_pref(z) ((z)->zbz_type == ZBC_ZT_SEQUENTIAL_PREF)
+
+/** @brief Test if a zone type is sequential write required or preferred */
+#define zbc_zone_sequential(z) 	(zbc_zone_sequential_req(z) || \
+				 zbc_zone_sequential_pref(z))
+
+/** @brief Get a zone condition */
+#define zbc_zone_condition(z)	((int)(z)->zbz_condition)
+
+/** @brief Test if a zone condition is "not write pointer zone" */
+#define zbc_zone_not_wp(z)	((z)->zbz_condition == ZBC_ZC_NOT_WP)
+
+/** @brief Test if a zone condition is empty */
+#define zbc_zone_empty(z)	((z)->zbz_condition == ZBC_ZC_EMPTY)
+
+/** @brief Test if a zone condition is implicit open */
+#define zbc_zone_imp_open(z)	((z)->zbz_condition == ZBC_ZC_IMP_OPEN)
+
+/** @brief Test if a zone condition is explicit open */
+#define zbc_zone_exp_open(z)	((z)->zbz_condition == ZBC_ZC_EXP_OPEN)
+
+/** @brief Test if a zone condition is explicit or implicit open */
+#define zbc_zone_is_open(z)	(zbc_zone_imp_open(z) || \
+				 zbc_zone_exp_open(z))
+
+/** @brief Test if a zone condition is closed */
+#define zbc_zone_closed(z)	((z)->zbz_condition == ZBC_ZC_CLOSED)
+
+/** @brief Test if a zone condition is full */
+#define zbc_zone_full(z)	((z)->zbz_condition == ZBC_ZC_FULL)
+
+/** @brief Test if a zone condition is read-only */
+#define zbc_zone_rdonly(z)	((z)->zbz_condition == ZBC_ZC_RDONLY)
+
+/** @brief Test if a zone condition is offline */
+#define zbc_zone_offline(z)	((z)->zbz_condition == ZBC_ZC_OFFLINE)
+
+/** @brief Test if a zone has the reset recommended flag set */
+#define zbc_zone_rwp_recommended(z) ((z)->zbz_attributes & \
+				     ZBC_ZA_RWP_RECOMMENDED)
+
+/** @brief Test if a zone has the non sequential write resource allocated flag set */
+#define zbc_zone_non_seq(z)	((z)->zbz_attributes & ZBC_ZA_NON_SEQ)
+
+/** @brief Get a zone start 512B sector */
+#define zbc_zone_start(z)	((unsigned long long)(z)->zbz_start)
+
+/** @brief Get a zone number of 512B sectors */
+#define zbc_zone_length(z)	((unsigned long long)(z)->zbz_length)
+
+/** @brief Get a zone write pointer 512B sector position */
+#define zbc_zone_wp(z)		((unsigned long long)(z)->zbz_write_pointer)
 
 /**
  * @brief Zone information data structure
@@ -420,6 +483,18 @@ enum zbc_dev_flags {
 };
 
 /**
+ * "not reported" value for the number of zones limits in the device
+ * information (zbd_opt_nr_non_seq_write_seq_pref and zbd_max_nr_open_seq_req).
+ */
+#define ZBC_NOT_REPORTED	((uint32_t)0xFFFFFFFF)
+
+/**
+ * "no limit" value for the number of explicitly open sequential write required
+ * zones in the device information (zbd_max_nr_open_seq_req).
+ */
+#define ZBC_NO_LIMIT		((uint32_t)0xFFFFFFFF)
+
+/**
  * @brief Device information data structure
  *
  * Provide information on a device open using the \a zbc_open function.
@@ -479,20 +554,23 @@ struct zbc_device_info {
 
 	/**
 	 * Optimal maximum number of explicitly open sequential write
-	 * preferred zones (host-aware device models only).
+	 * preferred zones (host-aware device models only). A value
+	 * of "-1" means that the drive did not report any value.
 	 */
 	uint32_t		zbd_opt_nr_open_seq_pref;
 
 	/**
 	 * Optimal maximum number of sequential write preferred zones
 	 * with the ZBC_ZA_NON_SEQ zone attribute set
-	 * (host-aware device models only).
+	 * (host-aware device models only). A value of "-1" means that
+	 * the drive did not report any value.
 	 */
 	uint32_t		zbd_opt_nr_non_seq_write_seq_pref;
 
 	/**
 	 * Maximum number of explicitly open sequential write required
-	 * zones (host-managed device models only).
+	 * zones (host-managed device models only). A value of "-1" means
+	 * that there is no restrictions on the number of open zones.
 	 */
 	uint32_t		zbd_max_nr_open_seq_req;
 
@@ -518,6 +596,12 @@ struct zbc_device_info {
  * SCSI sense keys inspected in case of command error.
  */
 enum zbc_sk {
+
+	/** Not ready */
+	ZBC_SK_NOT_READY	= 0x2,
+
+	/** Medium error */
+	ZBC_SK_MEDIUM_ERROR	= 0x3,
 
 	/** Illegal request */
 	ZBC_SK_ILLEGAL_REQUEST	= 0x5,
@@ -560,6 +644,15 @@ enum zbc_asc_ascq {
 
 	/** Insufficient zone resources */
 	ZBC_ASC_INSUFFICIENT_ZONE_RESOURCES		= 0x550E,
+
+	/** Read error */
+	ZBC_ASC_READ_ERROR				= 0x1100,
+
+	/** Write error */
+	ZBC_ASC_WRITE_ERROR				= 0x0C00,
+
+	/** Format in progress */
+	ZBC_ASC_FORMAT_IN_PROGRESS			= 0x0404,
 };
 
 /**

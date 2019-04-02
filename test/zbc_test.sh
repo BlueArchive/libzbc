@@ -30,7 +30,9 @@ function zbc_print_usage()
 	echo "Options"
 	echo "  -h | --help              : Print this usage"
 	echo "  -l | --list              : List all test cases"
-	echo "  -b | --batch             : Use batch mode (do not stop on failed tests)"
+	echo "  -B | --nobatch           : Bail out of test suite immediately on test failure"
+	echo "  -b | --batch             : Batch mode: do not stop on failed tests"
+	echo "                             Deprecated option, batch mode is the default behavior"
 	echo "  -e | --exec <test number>: Execute only the specified test."
 	echo "                             This option may be repeated multiple times"
 	echo "                             to execute multiple tests in one run."
@@ -51,15 +53,15 @@ fi
 
 # Check credentials
 if [ $(id -u) -ne 0 ]; then
-	echo "Only root can do this."
+	echo "Only root can run tests."
 	exit 1
 fi
 
 # Check tests subdirs
-ZBC_TEST_DIR=$(cd $(dirname $0);pwd)
+cd `dirname $0`
 
 # Test programs directory
-ZBC_TEST_BIN_PATH=${ZBC_TEST_DIR}/programs
+ZBC_TEST_BIN_PATH=programs
 if [ ! -d ${ZBC_TEST_BIN_PATH} ]; then
     echo "Test program directory ${ZBC_TEST_BIN_PATH} does not exist"
     exit
@@ -86,15 +88,13 @@ for p in ${test_progs[@]}; do
 	fi
 done
 
-ZBC_TEST_SCR_PATH=${ZBC_TEST_DIR}/scripts
+ZBC_TEST_SCR_PATH=scripts
 if [ ! -d ${ZBC_TEST_SCR_PATH} ]; then
     echo "Test script directory ${ZBC_TEST_SCR_PATH} does not exist"
     exit
 fi
 
-ZBC_TEST_LOG_PATH=${ZBC_TEST_DIR}/log
-
-cd ${ZBC_TEST_DIR}
+ZBC_TEST_LOG_PATH=log
 
 # Handle arguments
 argv=("$@")
@@ -104,7 +104,7 @@ argimax=$((argc-1))
 exec_list=()
 skip_list=()
 print_list=0
-batch_mode=0
+batch_mode=1
 force_ata=0
 
 # Store argument
@@ -117,6 +117,9 @@ for (( i=0; i<${argc}; i++ )); do
 	-l | --list )
 		print_list=1
 		break
+		;;
+	-B | --nobatch)
+		batch_mode=0
 		;;
 	-b | --batch)
 		batch_mode=1
@@ -158,13 +161,28 @@ if [ ${print_list} -eq 1 ]; then
 	device=""
 fi
 
-# Check device path
+# Check device path if one was specified
 if [ ! -z ${device} ]; then
+
+	# Resolve symbolic links
+	device="`readlink -e -n ${device}`"
 	if [ ! -e ${device} ]; then
 		echo "Device \"${device}\" not found"
 		exit 1
 	fi
-	dev_name=`basename ${device}`
+
+	# Only SG nodes (character device files of SCSI or ATA disks) are
+	# allowed
+	if [ ! -c ${device} ]; then
+                echo "Device \"${device}\" is not an SG node"
+                exit 1
+        fi
+
+	dev_name=`basename "${device}"`
+	if [ ! -e /sys/class/scsi_generic/${dev_name} ]; then
+                echo "Device \"${device}\" is not a SCSI/ATA device"
+                exit 1
+        fi
 fi
 
 # Build run list
@@ -182,7 +200,7 @@ function get_exec_list()
 	done
 }
 
-function get_sect_num()
+function get_section_num()
 {
     	testnum=$1
 	_IFS="${IFS}"
@@ -220,7 +238,7 @@ IFS="$_IFS"
 # Substract skip list from exec list. At the same time,
 # extract the section list.
 run_list=()
-sect_list=()
+section_list=()
 for e in ${exec_list[@]}; do
 
     	run=1
@@ -237,51 +255,49 @@ for e in ${exec_list[@]}; do
 	fi
 
 	run_list+=(${e})
-	sect_num=`get_sect_num ${e}`
-	sect_list+=(${sect_num})
+	section_num=`get_section_num ${e}`
+	section_list+=(${section_num})
 
 done
 
-sect_list=(`for s in ${sect_list[@]}; do echo "${s}"; done | sort -u`)
+section_list=(`for s in ${section_list[@]}; do echo "${s}"; done | sort -u`)
 
 # Run test cases of a section
 function zbc_run_section()
 {
 	local ret=0
-	local sect_num="$1"
-	local sect_name="$2"
+	local section_num="$1"
+	local section_name="$2"
 
-	sect_path=`find ${ZBC_TEST_SCR_PATH} -type d -name "${sect_num}*" -print`
-	if [ -z "${sect_path}" ]; then
-		echo "Test script directory ${sect_path} does not exist"
+	section_path=`find ${ZBC_TEST_SCR_PATH} -type d -name "${section_num}*" -print`
+	if [ -z "${section_path}" ]; then
+		echo "Test script directory ${section_path} does not exist"
 		exit
 	fi
 
-	log_path=${ZBC_TEST_LOG_PATH}/${dev_name}/${sect_num}
+	log_path=${ZBC_TEST_LOG_PATH}/${dev_name}/${section_num}
 	mkdir -p ${log_path}
-
-	pushd ${sect_path} > /dev/null 2>&1
 
 	if [ ${print_list} -eq 1 ]; then
 		# Printing test cases only
-		echo "Section ${sect} - ${sect_name} tests"
+		echo "Section ${section} - ${section_name} tests"
 	else
 		# Init: Close and reset all zones
 		${ZBC_TEST_BIN_PATH}/zbc_test_close_zone ${device} -1
 		${ZBC_TEST_BIN_PATH}/zbc_test_reset_zone ${device} -1
-		echo "Executing section ${sect} - ${sect_name} tests..."
+		echo "Executing section ${section} - ${section_name} tests..."
 	fi
 
     	# Execute test cases for this section
     	for t in ${run_list[@]}; do
 
-		s=`get_sect_num ${t}`
-		if [ "${s}" != "${sect_num}" ]; then
+		s=`get_section_num ${t}`
+		if [ "${s}" != "${section_num}" ]; then
 			continue
 		fi
 
 		c=`get_case_num ${t}`
-        	./${c}.sh ${ZBC_TEST_BIN_PATH} ${log_path} ${sect_num} ${device}
+        	./${section_path}/${c}.sh ${ZBC_TEST_BIN_PATH} ${log_path} ${section_num} ${device}
 		ret=$?
 
         	if [ ${batch_mode} -eq 1 ]; then
@@ -298,31 +314,29 @@ function zbc_run_section()
 
 	done
 
-	popd > /dev/null 2>&1
-
 	return ${ret}
 }
 
 # Run tests
-for sect in ${sect_list[@]}; do
+for section in ${section_list[@]}; do
 
-	case "${sect}" in
+	case "${section}" in
 	"00")
-		sect_name="command completion"
+		section_name="command completion"
 		;;
 	"01")
-		sect_name="sense key, sense code"
+		section_name="sense key, sense code"
 		;;
 	"02")
-		sect_name="zone state machine"
+		section_name="zone state machine"
 		;;
 	* )
-		echo "Unknown test section ${sect}"
+		echo "Unknown test section ${section}"
 		exit 1
 		;;
 	esac
 
-	zbc_run_section "${sect}" "${sect_name}"
+	zbc_run_section "${section}" "${section_name}"
 	if [ $? -ne 0 ]; then
 		exit 1
 	fi

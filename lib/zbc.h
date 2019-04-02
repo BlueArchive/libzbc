@@ -127,19 +127,26 @@ struct zbc_device {
 	/**
 	 * Device open flags.
 	 */
-	unsigned int		zbd_flags;
+	unsigned int		zbd_o_flags;
 
 	/**
 	 * Device backend driver flags.
 	 */
 	unsigned int		zbd_drv_flags;
 
-	/**
-	 * Command execution error info.
-	 */
-	struct zbc_errno	zbd_errno;
-
 };
+
+/**
+ * Per-thread local zbc_errno handling.
+ */
+extern __thread struct zbc_errno zerrno;
+
+static inline void zbc_set_errno(enum zbc_sk sk, enum zbc_asc_ascq asc_ascq)
+{
+	zerrno.sk = sk;
+	zerrno.asc_ascq = asc_ascq;
+}
+#define zbc_clear_errno()	zbc_set_errno(0, 0)
 
 /**
  * Test if a device is zoned.
@@ -160,7 +167,7 @@ struct zbc_device {
  * Test if a device is in test mode.
  */
 #ifdef HAVE_DEVTEST
-#define zbc_test_mode(dev)	((dev)->zbd_flags & ZBC_O_DEVTEST)
+#define zbc_test_mode(dev)	((dev)->zbd_o_flags & ZBC_O_DEVTEST)
 #else
 #define zbc_test_mode(dev)	(false)
 #endif
@@ -216,7 +223,7 @@ struct zbc_drv zbc_fake_drv;
  * some zone operation.
  */
 int zbc_scsi_get_zbd_characteristics(struct zbc_device *dev);
-int zbc_scsi_zone_op(struct zbc_device *dev, uint64_t start_lba,
+int zbc_scsi_zone_op(struct zbc_device *dev, uint64_t start_sector,
 		     enum zbc_zone_op op, unsigned int flags);
 
 /**
@@ -232,11 +239,11 @@ int zbc_scsi_flush(struct zbc_device *dev);
  * Log levels.
  */
 enum {
-	ZBC_LOG_NONE = 0,
-	ZBC_LOG_WARNING,
-	ZBC_LOG_ERROR,
-	ZBC_LOG_INFO,
-	ZBC_LOG_DEBUG,
+	ZBC_LOG_NONE = 0,	/* Disable all messages */
+	ZBC_LOG_WARNING,	/* Critical errors (invalid drive,...) */
+	ZBC_LOG_ERROR,		/* Normal errors (I/O errors etc) */
+	ZBC_LOG_INFO,		/* Informational */
+	ZBC_LOG_DEBUG,		/* Debug-level messages */
 	ZBC_LOG_MAX
 };
 

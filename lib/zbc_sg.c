@@ -14,12 +14,12 @@
  *         Christophe Louargant (christophe.louargant@wdc.com)
  */
 
-/***** Including files *****/
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <libgen.h>
 #include <string.h>
+#include <linux/limits.h>
+#include <linux/fs.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -27,8 +27,6 @@
 
 #include "zbc.h"
 #include "zbc_sg.h"
-
-/***** Private data *****/
 
 /**
  * Definition of the commands
@@ -45,7 +43,7 @@ static struct zbc_sg_cmd_s
 
 } zbc_sg_cmd_list[ZBC_SG_CMD_NUM] = {
 
-	/* ZBC_SG_TEST_UNIT_READY */
+	[ZBC_SG_TEST_UNIT_READY] =
 	{
 		"TEST UNIT READY",
 		ZBC_SG_TEST_UNIT_READY_CDB_OPCODE,
@@ -54,7 +52,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_INQUIRY */
+	[ZBC_SG_INQUIRY] =
 	{
 		"INQUIRY",
 		ZBC_SG_INQUIRY_CDB_OPCODE,
@@ -63,7 +61,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_FROM_DEV
 	},
 
-	/* ZBC_SG_READ_CAPACITY */
+	[ZBC_SG_READ_CAPACITY] =
 	{
 		"READ CAPACITY 16",
 		ZBC_SG_READ_CAPACITY_CDB_OPCODE,
@@ -72,7 +70,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_FROM_DEV
 	},
 
-	/* ZBC_SG_READ */
+	[ZBC_SG_READ] =
 	{
 		"READ 16",
 		ZBC_SG_READ_CDB_OPCODE,
@@ -81,7 +79,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_FROM_DEV
 	},
 
-	/* ZBC_SG_WRITE */
+	[ZBC_SG_WRITE] =
 	{
 		"WRITE 16",
 		ZBC_SG_WRITE_CDB_OPCODE,
@@ -90,7 +88,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_TO_DEV
 	},
 
-	/* ZBC_SG_SYNC_CACHE */
+	[ZBC_SG_SYNC_CACHE] =
 	{
 		"SYNCHRONIZE CACHE 16",
 		ZBC_SG_SYNC_CACHE_CDB_OPCODE,
@@ -99,7 +97,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_REPORT_ZONES */
+	[ZBC_SG_REPORT_ZONES] =
 	{
 		"REPORT ZONES",
 		ZBC_SG_REPORT_ZONES_CDB_OPCODE,
@@ -108,7 +106,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_FROM_DEV
 	},
 
-	/* ZBC_SG_RESET_ZONE */
+	[ZBC_SG_RESET_ZONE] =
 	{
 		"RESET WRITE POINTER",
 		ZBC_SG_RESET_ZONE_CDB_OPCODE,
@@ -117,7 +115,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_OPEN_ZONE */
+	[ZBC_SG_OPEN_ZONE] =
 	{
 		"OPEN ZONE",
 		ZBC_SG_OPEN_ZONE_CDB_OPCODE,
@@ -126,7 +124,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_CLOSE_ZONE */
+	[ZBC_SG_CLOSE_ZONE] =
 	{
 		"CLOSE ZONE",
 		ZBC_SG_CLOSE_ZONE_CDB_OPCODE,
@@ -135,7 +133,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_FINISH_ZONE */
+	[ZBC_SG_FINISH_ZONE] =
 	{
 		"FINISH ZONE",
 		ZBC_SG_FINISH_ZONE_CDB_OPCODE,
@@ -144,7 +142,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_SET_ZONES */
+	[ZBC_SG_SET_ZONES] =
 	{
 		"SET ZONES",
 		ZBC_SG_SET_ZONES_CDB_OPCODE,
@@ -153,7 +151,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_SET_WRITE_POINTER */
+	[ZBC_SG_SET_WRITE_POINTER] =
 	{
 		"SET WRITE POINTER",
 		ZBC_SG_SET_WRITE_POINTER_CDB_OPCODE,
@@ -162,7 +160,7 @@ static struct zbc_sg_cmd_s
 		SG_DXFER_NONE
 	},
 
-	/* ZBC_SG_ATA16 */
+	[ZBC_SG_ATA16] =
 	{
 		"ATA 16",
 		ZBC_SG_ATA16_CDB_OPCODE,
@@ -174,10 +172,24 @@ static struct zbc_sg_cmd_s
 };
 
 /**
+ * Get the system pagesize
+ */
+static size_t pagesize;	/* use accessor */
+static inline size_t sysconf_pagesize(void)
+{
+    if (!pagesize) {
+	pagesize = sysconf(_SC_PAGESIZE);
+    }
+    return pagesize;
+}
+
+/**
  * Get a command name from its operation code in a CDB.
  */
 static char *zbc_sg_cmd_name(struct zbc_sg_cmd *cmd)
 {
+	unsigned int sense_buf_len = 0;
+	uint8_t *sense_buf = NULL;
 
 	if (cmd->code >= 0 &&
 	    cmd->code < ZBC_SG_CMD_NUM)
@@ -200,36 +212,47 @@ static void zbc_sg_set_sense(struct zbc_device *dev, struct zbc_sg_cmd *cmd)
 	}
 
 	if (sense_buf == NULL ||
-	    sense_buf_len < 13) {
-		dev->zbd_errno.sk = 0x00;
-		dev->zbd_errno.asc_ascq = 0x0000;
+	    sense_buf_len < 4) {
+		zbc_clear_errno();
 		return;
 	}
 
 	if ((sense_buf[0] & 0x7F) == 0x72 ||
 	    (sense_buf[0] & 0x7F) == 0x73) {
 		/* store sense key, ASC/ASCQ */
-		dev->zbd_errno.sk = sense_buf[1] & 0x0F;
-		dev->zbd_errno.asc_ascq =
-			((int)sense_buf[2] << 8) | (int)sense_buf[3];
+		zbc_set_errno(sense_buf[1] & 0x0F,
+			      ((int)sense_buf[2] << 8) | (int)sense_buf[3]);
+		return;
+	}
+
+	if (sense_buf_len < 14) {
+		zbc_clear_errno();
 		return;
 	}
 
 	if ((sense_buf[0] & 0x7F) == 0x70 ||
 	    (sense_buf[0] & 0x7F) == 0x71) {
 		/* store sense key, ASC/ASCQ */
-		dev->zbd_errno.sk = sense_buf[2] & 0x0F;
-		dev->zbd_errno.asc_ascq =
-			((int)sense_buf[12] << 8) | (int)sense_buf[13];
+		zbc_set_errno(sense_buf[2] & 0x0F,
+			      ((int)sense_buf[12] << 8) | (int)sense_buf[13]);
 	}
 }
+
+#ifdef SG_FLAG_DIRECT_IO
+#define ZBC_SG_FLAG_DIRECT_IO	SG_FLAG_DIRECT_IO
+#else
+#define ZBC_SG_FLAG_DIRECT_IO	0x01
+#endif
+#define ZBC_SG_FLAG_Q_AT_TAIL	0x10
 
 /**
  * Initialize a command.
  */
-int zbc_sg_cmd_init(struct zbc_sg_cmd *cmd, int cmd_code,
+int zbc_sg_cmd_init(struct zbc_device *dev,
+		    struct zbc_sg_cmd *cmd, int cmd_code,
 		    uint8_t *out_buf, size_t out_bufsz)
 {
+	zbc_assert(cmd_code >= 0 && cmd_code < ZBC_SG_CMD_NUM);
 
 	/* Set command */
 	memset(cmd, 0, sizeof(struct zbc_sg_cmd));
@@ -239,11 +262,11 @@ int zbc_sg_cmd_init(struct zbc_sg_cmd *cmd, int cmd_code,
 	cmd->cdb_opcode = zbc_sg_cmd_list[cmd_code].cdb_opcode;
 	cmd->cdb_sa = zbc_sg_cmd_list[cmd_code].cdb_sa;
 
-	if (!out_buf) {
+	if (!out_buf && out_bufsz > 0) {
 
 		/* Allocate a buffer */
 		if (posix_memalign((void **) &cmd->out_buf,
-				   sysconf(_SC_PAGESIZE), out_bufsz) != 0) {
+				   sysconf_pagesize(), out_bufsz) != 0) {
 			zbc_error("No memory for command output buffer (%zu B)\n",
 				  out_bufsz);
 			return -ENOMEM;
@@ -262,20 +285,23 @@ int zbc_sg_cmd_init(struct zbc_sg_cmd *cmd, int cmd_code,
 	cmd->out_bufsz = out_bufsz;
 
 	/* Setup SGIO header */
-	cmd->io_hdr.interface_id    = 'S';
-	cmd->io_hdr.timeout         = 20000;
-	cmd->io_hdr.flags           = 0x10; //SG_FLAG_Q_AT_TAIL;
+	cmd->io_hdr.interface_id = 'S';
+	cmd->io_hdr.timeout = 20000;
 
-	cmd->io_hdr.cmd_len         = cmd->cdb_sz;
-	cmd->io_hdr.cmdp            = &cmd->cdb[0];
+	cmd->io_hdr.flags = ZBC_SG_FLAG_Q_AT_TAIL;
+	if (dev->zbd_o_flags & ZBC_O_DIRECT && cmd->out_bufsz)
+		cmd->io_hdr.flags |= ZBC_SG_FLAG_DIRECT_IO;
+
+	cmd->io_hdr.cmd_len = cmd->cdb_sz;
+	cmd->io_hdr.cmdp = &cmd->cdb[0];
 
 	cmd->io_hdr.dxfer_direction = zbc_sg_cmd_list[cmd_code].dir;
-	cmd->io_hdr.dxfer_len       = cmd->out_bufsz;
+	cmd->io_hdr.dxfer_len = cmd->out_bufsz;
 	if (cmd->out_bufsz)
-		cmd->io_hdr.dxferp  = cmd->out_buf;
+		cmd->io_hdr.dxferp = cmd->out_buf;
 
-	cmd->io_hdr.mx_sb_len       = ZBC_SG_SENSE_MAX_LENGTH;
-	cmd->io_hdr.sbp             = cmd->sense_buf;
+	cmd->io_hdr.mx_sb_len = ZBC_SG_SENSE_MAX_LENGTH;
+	cmd->io_hdr.sbp = cmd->sense_buf;
 
 	return 0;
 }
@@ -308,6 +334,11 @@ int zbc_sg_cmd_exec(struct zbc_device *dev, struct zbc_sg_cmd *cmd)
 			  zbc_sg_cmd_name(cmd));
 		zbc_sg_print_bytes(dev, cmd->cdb, cmd->cdb_sz);
 	}
+
+	zbc_debug("%s: Execute %s command with buffer of %zu B\n",
+		  dev->zbd_filename,
+		  (cmd->io_hdr.flags & ZBC_SG_FLAG_DIRECT_IO) ? "direct" : "normal",
+		  cmd->out_bufsz);
 
 	/* Send the SG_IO command */
 	ret = ioctl(dev->zbd_sg_fd, SG_IO, &cmd->io_hdr);
@@ -407,35 +438,103 @@ int zbc_sg_cmd_exec(struct zbc_device *dev, struct zbc_sg_cmd *cmd)
 }
 
 /**
- * SG command maximum transfer length in number of 4KB pages.
- * This may limits the SG reported value to a smaller value
- * likely to work with most HBAs.
+ * Get the absolute device path from the device filename.
  */
-#define ZBC_SG_MAX_SEGMENTS	128
+static void zbc_sg_get_device_path(struct zbc_device *dev, char *path)
+{
+	struct stat lst;
+	char target[PATH_MAX];
+	ssize_t len;
+
+	strncpy(path, dev->zbd_filename, PATH_MAX - 1);
+
+	while (1) {
+		if (lstat(path, &lst) != 0) {
+			zbc_error("%s: lstat %s failed %d (%s)\n",
+				  dev->zbd_filename, path,
+				  errno, strerror(errno));
+			return;
+		}
+
+		if (!S_ISLNK(lst.st_mode))
+			return;
+
+		len = readlink(path, target, PATH_MAX - 1);
+		if (len < 0) {
+			zbc_error("%s: readlink failed %d (%s)\n",
+				  dev->zbd_filename,
+				  errno, strerror(errno));
+			return;
+		}
+		target[len] = '\0';
+		strncpy(path, target, PATH_MAX);
+	}
+}
 
 /**
- * Get the maximum allowed command size of a block device.
+ * Get a sysfs file integer value.
  */
-static int zbc_sg_max_segments(struct zbc_device *dev)
+static int zbc_sg_get_sysfs_val(char *sysfs_path, unsigned long *val)
 {
-	unsigned int max_segs = ZBC_SG_MAX_SEGMENTS;
-	FILE *fmax_segs;
+	int ret = -1;
+	FILE *f;
+
+	f = fopen(sysfs_path, "r");
+	if (f) {
+		ret = fscanf(f, "%lu", val);
+		if (ret == 1)
+			ret = 0;
+		fclose(f);
+	}
+
+	return ret;
+}
+
+/**
+ * SG command maximum transfer length in number of 4KB pages.
+ * This may limit the SG reported value to a smaller value likely to work
+ * with most HBAs.
+ */
+#define ZBC_SG_MAX_SEGMENTS	256
+
+/**
+ * Get the maximum allowed number of memory segments of a command.
+ */
+static unsigned long zbc_sg_get_max_segments(struct zbc_device *dev)
+{
+	unsigned long max_segs;
+	char path[PATH_MAX];
 	char str[128];
-	int ret;
+
+	zbc_sg_get_device_path(dev, path);
 
 	snprintf(str, sizeof(str),
 		 "/sys/block/%s/queue/max_segments",
-		 basename(dev->zbd_filename));
-
-	fmax_segs = fopen(str, "r");
-	if (fmax_segs) {
-		ret = fscanf(fmax_segs, "%u", &max_segs);
-		if (ret != 1)
-			max_segs = ZBC_SG_MAX_SEGMENTS;
-		fclose(fmax_segs);
-	}
+		 basename(path));
+	if (zbc_sg_get_sysfs_val(str, &max_segs) < 0)
+		max_segs = ZBC_SG_MAX_SEGMENTS;
 
 	return max_segs;
+}
+
+/**
+ * Get the maximum allowed number of bytes of a command.
+ */
+static unsigned long zbc_sg_get_max_bytes(struct zbc_device *dev)
+{
+	unsigned long max_bytes;
+	char path[PATH_MAX];
+	char str[128];
+
+	zbc_sg_get_device_path(dev, path);
+
+	snprintf(str, sizeof(str),
+		 "/sys/block/%s/queue/max_sectors_kb",
+		 basename(path));
+	if (zbc_sg_get_sysfs_val(str, &max_bytes) < 0)
+		max_bytes = 0;
+
+	return max_bytes * 1024;
 }
 
 /**
@@ -443,8 +542,9 @@ static int zbc_sg_max_segments(struct zbc_device *dev)
  */
 void zbc_sg_get_max_cmd_blocks(struct zbc_device *dev)
 {
+	unsigned int max_bytes = 0, max_segs = ZBC_SG_MAX_SEGMENTS;
+	size_t pagesize = sysconf_pagesize();
 	struct stat st;
-	size_t sgsz = 0;
 	int ret;
 
 	/* Get device stats */
@@ -456,23 +556,35 @@ void zbc_sg_get_max_cmd_blocks(struct zbc_device *dev)
 	}
 
 	if (S_ISCHR(st.st_mode)) {
-		ret = ioctl(dev->zbd_sg_fd, SG_GET_SG_TABLESIZE, &sgsz);
+		ret = ioctl(dev->zbd_sg_fd, SG_GET_SG_TABLESIZE, &max_segs);
 		if (ret != 0) {
 			zbc_debug("%s: SG_GET_SG_TABLESIZE ioctl failed %d (%s)\n",
 				  dev->zbd_filename,
 				  errno,
 				  strerror(errno));
-			sgsz = 0;
+			max_segs = ZBC_SG_MAX_SEGMENTS;
+		}
+
+		ret = ioctl(dev->zbd_sg_fd, BLKSECTGET, &max_bytes);
+		if (ret != 0) {
+			zbc_debug("%s: BLKSECTGET ioctl failed %d (%s)\n",
+				  dev->zbd_filename,
+				  errno,
+				  strerror(errno));
+			max_bytes = 0;
 		}
 	} else if (S_ISBLK(st.st_mode)) {
-		sgsz = zbc_sg_max_segments(dev);
+		max_segs = zbc_sg_get_max_segments(dev);
+		max_bytes = zbc_sg_get_max_bytes(dev);
+	} else {
+		/* Use default */
+		max_segs = ZBC_SG_MAX_SEGMENTS;
 	}
 
 out:
-	if (!sgsz || sgsz > ZBC_SG_MAX_SEGMENTS)
-		sgsz = ZBC_SG_MAX_SEGMENTS;
-	dev->zbd_info.zbd_max_rw_sectors =
-		((uint64_t)sgsz * sysconf(_SC_PAGESIZE)) >> 9;
+	if (!max_bytes || max_bytes > max_segs * pagesize)
+		max_bytes = max_segs * pagesize;
+	dev->zbd_info.zbd_max_rw_sectors = max_bytes >> 9;
 
 	zbc_debug("%s: Maximum command data transfer size is %llu sectors\n",
 		  dev->zbd_filename,
@@ -493,7 +605,8 @@ int zbc_sg_test_unit_ready(struct zbc_device *dev)
 		retries--;
 
 		/* Intialize command */
-		ret = zbc_sg_cmd_init(&cmd, ZBC_SG_TEST_UNIT_READY, NULL, 0);
+		ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_TEST_UNIT_READY,
+				      NULL, 0);
 		if (ret != 0) {
 			zbc_error("%s: init TEST UNIT READY command failed\n",
 				  dev->zbd_filename);
@@ -589,7 +702,7 @@ void zbc_sg_print_bytes(struct zbc_device *dev, uint8_t *buf, unsigned int len)
 		}
 
 		zbc_debug("%s\n", msg);
-		if (i < (len - 4))
+		if (i + 4 < len)
 			zbc_debug("%s: * |=====+======+======+======+======+\n",
 				  dev->zbd_filename);
 		else

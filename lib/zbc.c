@@ -28,8 +28,8 @@ int zbc_log_level = ZBC_LOG_WARNING;
  */
 static struct zbc_drv *zbc_drv[] = {
 	&zbc_block_drv,
-	&zbc_ata_drv,
 	&zbc_scsi_drv,
+	&zbc_ata_drv,
 	&zbc_fake_drv,
 	NULL
 };
@@ -93,13 +93,15 @@ static struct zbc_sg_asc_ascq_s {
 	}
 };
 
-/***** Definition of public functions *****/
+/**
+ * Per-thread local zbc_errno handling.
+ */
+__thread struct zbc_errno zerrno;
 
 /**
  * zbc_set_log_level - Set the library log level
  */
-void
-zbc_set_log_level(char *log_level)
+void zbc_set_log_level(char const *log_level)
 {
 	if (!log_level) {
 		/* Set default */
@@ -212,7 +214,7 @@ const char *zbc_zone_condition_str(enum zbc_zone_condition cond)
  */
 void zbc_errno(struct zbc_device *dev, struct zbc_errno *err)
 {
-        memcpy(err, &dev->zbd_errno, sizeof(struct zbc_errno));
+	memcpy(err, &zerrno, sizeof(struct zbc_errno));
 }
 
 /**
@@ -356,6 +358,8 @@ void zbc_get_device_info(struct zbc_device *dev, struct zbc_device_info *info)
  */
 void zbc_print_device_info(struct zbc_device_info *info, FILE *out)
 {
+	char tmp[64];
+
 	fprintf(out,
 		"    Vendor ID: %s\n",
 		info->zbd_vendor_id);
@@ -392,16 +396,37 @@ void zbc_print_device_info(struct zbc_device_info *info, FILE *out)
 			"unrestricted" : "restricted");
 
 	if (info->zbd_model == ZBC_DM_HOST_MANAGED) {
+
+		if (info->zbd_max_nr_open_seq_req == ZBC_NO_LIMIT)
+			strcpy(tmp, "unlimited");
+		else
+			sprintf(tmp, "%u",
+				(unsigned int) info->zbd_max_nr_open_seq_req);
 		fprintf(out,
-			"    Maximum number of open sequential write required zones: %u\n",
-		       (unsigned int) info->zbd_max_nr_open_seq_req);
+			"    Maximum number of open sequential write "
+			"required zones: %s\n", tmp);
+
 	} else if (info->zbd_model == ZBC_DM_HOST_AWARE) {
+
+		if (info->zbd_opt_nr_open_seq_pref == ZBC_NOT_REPORTED)
+			strcpy(tmp, "not reported");
+		else
+			sprintf(tmp, "%u",
+				(unsigned int)info->zbd_opt_nr_open_seq_pref);
 		fprintf(out,
-			"    Optimal number of open sequential write preferred zones: %u\n",
-			(unsigned int) info->zbd_opt_nr_open_seq_pref);
+			"    Optimal number of open sequential write "
+			"preferred zones: %s\n", tmp);
+
+		if (info->zbd_opt_nr_non_seq_write_seq_pref == ZBC_NOT_REPORTED)
+			strcpy(tmp, "not reported");
+		else
+			sprintf(tmp, "%u",
+				(unsigned int)info->zbd_opt_nr_non_seq_write_seq_pref);
+
 		fprintf(out,
-			"    Optimal number of non-sequentially written sequential write preferred zones: %u\n",
-			(unsigned int) info->zbd_opt_nr_non_seq_write_seq_pref);
+			"    Optimal number of non-sequentially written "
+			"sequential write preferred zones: %s\n", tmp);
+
 	}
 
 	fflush(out);
@@ -418,11 +443,13 @@ int zbc_report_zones(struct zbc_device *dev, uint64_t sector,
 	uint64_t last_sector;
 	int ret;
 
-	if (!zones)
+	if (!zones) {
 		/* Get the number of zones */
+		*nr_zones = 0;
 		return (dev->zbd_drv->zbd_report_zones)(dev, sector,
 							zbc_ro_mask(ro),
 							NULL, nr_zones);
+	}
 
         /* Get zones information */
         while (nz < *nr_zones) {
@@ -432,7 +459,7 @@ int zbc_report_zones(struct zbc_device *dev, uint64_t sector,
 					zbc_ro_mask(ro) | ZBC_RO_PARTIAL,
 					&zones[nz], &n);
 		if (ret != 0) {
-			zbc_error("%s: Get zones from LBA %llu failed %d (%s)\n",
+			zbc_error("%s: Get zones from sector %llu failed %d (%s)\n",
 				  dev->zbd_filename,
 				  (unsigned long long) sector,
 				  ret, strerror(-ret));
@@ -524,7 +551,14 @@ ssize_t zbc_pread(struct zbc_device *dev, void *buf,
 	size_t sz, rd_count = 0;
 	ssize_t ret;
 
-	if (!zbc_test_mode(dev)) {
+	if (zbc_test_mode(dev)) {
+		if (!count) {
+			zbc_error("%s: zero-length read at sector %llu\n",
+				  dev->zbd_filename,
+				  (unsigned long long) offset);
+			return -EINVAL;
+		}
+	} else {
 		if (!zbc_dev_sect_laligned(dev, count) ||
 		    !zbc_dev_sect_laligned(dev, offset)) {
 			zbc_error("%s: Unaligned read %zu sectors at sector %llu\n",
@@ -532,17 +566,27 @@ ssize_t zbc_pread(struct zbc_device *dev, void *buf,
 				  count, (unsigned long long) offset);
 			return -EINVAL;
 		}
-	}
 
-	if ((offset + count) > dev->zbd_info.zbd_sectors)
-		count = dev->zbd_info.zbd_sectors - offset;
-	if (!count ||
-	    offset >= dev->zbd_info.zbd_sectors)
-		return 0;
+		if ((offset + count) > dev->zbd_info.zbd_sectors)
+			count = dev->zbd_info.zbd_sectors - offset;
+		if (!count || offset >= dev->zbd_info.zbd_sectors)
+			return 0;
+	}
 
 	zbc_debug("%s: Read %zu sectors at sector %llu\n",
 		  dev->zbd_filename,
 		  count, (unsigned long long) offset);
+
+	if (zbc_test_mode(dev) && count == 0) {
+		ret = (dev->zbd_drv->zbd_pread)(dev, buf, count, offset);
+		if (ret < 0) {
+			zbc_error("%s: read of zero sectors at sector %llu failed %ld (%s)\n",
+				  dev->zbd_filename,
+				  (unsigned long long) offset,
+				  -ret, strerror(-ret));
+		}
+		return ret;
+	}
 
 	while (count) {
 
@@ -580,7 +624,14 @@ ssize_t zbc_pwrite(struct zbc_device *dev, const void *buf,
 	size_t sz, wr_count = 0;
 	ssize_t ret;
 
-	if (!zbc_test_mode(dev)) {
+	if (zbc_test_mode(dev)) {
+		if (!count) {
+			zbc_error("%s: zero-length write at sector %llu\n",
+				  dev->zbd_filename,
+				  (unsigned long long) offset);
+			return -EINVAL;
+		}
+	} else {
 		if (!zbc_dev_sect_paligned(dev, count) ||
 		    !zbc_dev_sect_paligned(dev, offset)) {
 			zbc_error("%s: Unaligned write %zu sectors at sector %llu\n",
@@ -588,17 +639,27 @@ ssize_t zbc_pwrite(struct zbc_device *dev, const void *buf,
 				  count, (unsigned long long) offset);
 			return -EINVAL;
 		}
-	}
 
-	if ((offset + count) > dev->zbd_info.zbd_sectors)
-		count = dev->zbd_info.zbd_sectors - offset;
-	if (!count ||
-	    offset >= dev->zbd_info.zbd_sectors)
-		return 0;
+		if ((offset + count) > dev->zbd_info.zbd_sectors)
+			count = dev->zbd_info.zbd_sectors - offset;
+		if (!count || offset >= dev->zbd_info.zbd_sectors)
+			return 0;
+	}
 
 	zbc_debug("%s: Write %zu sectors at sector %llu\n",
 		  dev->zbd_filename,
 		  count, (unsigned long long) offset);
+
+	if (zbc_test_mode(dev) && count == 0) {
+		ret = (dev->zbd_drv->zbd_pwrite)(dev, buf, count, offset);
+		if (ret < 0) {
+			zbc_error("%s: Write of zero sectors at sector %llu failed %ld (%s)\n",
+				  dev->zbd_filename,
+				  (unsigned long long) offset,
+				  -ret, strerror(-ret));
+		}
+		return ret;
+	}
 
 	while (count) {
 

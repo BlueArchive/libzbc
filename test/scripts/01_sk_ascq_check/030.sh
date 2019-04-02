@@ -12,7 +12,7 @@
 # with libzbc. If not, see  <http://opensource.org/licenses/BSD-2-Clause>.
 #
 
-. ../zbc_test_lib.sh
+. scripts/zbc_test_lib.sh
 
 zbc_test_init $0 "CLOSE_ZONE invalid zone start lba" $*
 
@@ -32,9 +32,8 @@ fi
 zbc_test_get_zone_info
 
 # Search target LBA
-target_lba="0"
-zbc_test_search_vals_from_zone_type_and_cond ${zone_type} "0x1"
-target_lba=$(( ${target_lba} + 1 ))
+zbc_test_get_target_zone_from_type_and_cond ${zone_type} "0x1"
+target_lba=$(( ${target_slba} + 1 ))
 
 # Start testing
 zbc_test_run ${bin_path}/zbc_test_close_zone -v ${device} ${target_lba}

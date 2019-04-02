@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -55,7 +56,7 @@ static int zbc_scsi_inquiry(struct zbc_device *dev,
 	int ret;
 
 	/* Allocate and intialize inquiry command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_INQUIRY, buf, buf_len);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_INQUIRY, buf, buf_len);
 	if (ret != 0)
 		return ret;
 
@@ -102,7 +103,7 @@ static int zbc_scsi_test_sat(struct zbc_device *dev)
 	int ret;
 
 	/* Allocate and intialize report zones command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_REPORT_ZONES, NULL, bufsz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_REPORT_ZONES, NULL, bufsz);
 	if (ret != 0)
 		return ret;
 
@@ -132,7 +133,7 @@ static int zbc_scsi_test_sat(struct zbc_device *dev)
 	cmd.cdb[1] = ZBC_SG_REPORT_ZONES_CDB_SA;
 	zbc_sg_set_int64(&cmd.cdb[2], 0);
 	zbc_sg_set_int32(&cmd.cdb[10], (unsigned int) bufsz);
-	cmd.cdb[14] = 0;
+	cmd.cdb[14] = ZBC_RO_PARTIAL;
 
 	/* Send the SG_IO command */
 	ret = zbc_sg_cmd_exec(dev, &cmd);
@@ -150,14 +151,40 @@ static int zbc_scsi_test_sat(struct zbc_device *dev)
 }
 
 /**
+ * Get information string from inquiry output.
+ */
+static inline char *zbc_scsi_str(char *dst, uint8_t *buf, int len)
+{
+	char *str = (char *) buf;
+	int i;
+
+	for (i = len - 1; i >= 0; i--) {
+	       if (isalnum(str[i]))
+		       break;
+	}
+
+	if (i >= 0)
+		memcpy(dst, str, i + 1);
+
+	return dst;
+}
+
+#define ZBC_SCSI_VID_LEN	8
+#define ZBC_SCSI_PID_LEN	16
+#define ZBC_SCSI_REV_LEN	4
+
+/**
  * Get information (model, vendor, ...) from a SCSI device.
  */
 static int zbc_scsi_classify(struct zbc_device *dev)
 {
 	uint8_t buf[ZBC_SCSI_INQUIRY_BUF_LEN];
+	char vid[ZBC_SCSI_VID_LEN + 1];
+	char pid[ZBC_SCSI_PID_LEN + 1];
+	char rev[ZBC_SCSI_REV_LEN + 1];
 	uint8_t zoned;
 	int dev_type;
-	int n, ret;
+	int ret;
 
 	/* Get device info */
 	ret = zbc_scsi_inquiry(dev, 0, buf, ZBC_SCSI_INQUIRY_BUF_LEN);
@@ -180,17 +207,19 @@ static int zbc_scsi_classify(struct zbc_device *dev)
 	/* This is a SCSI device */
 	dev->zbd_info.zbd_type = ZBC_DT_SCSI;
 
-	/* Vendor identification */
-	n = zbc_sg_strcpy(&dev->zbd_info.zbd_vendor_id[0],
-			  (char *)&buf[8], 8);
-
-	/* Product identification */
-	n += zbc_sg_strcpy(&dev->zbd_info.zbd_vendor_id[n],
-			   (char *)&buf[16], 16);
-
-	/* Product revision */
-	n += zbc_sg_strcpy(&dev->zbd_info.zbd_vendor_id[n],
-			   (char *)&buf[32], 4);
+	/*
+	 * Concatenate vendor identification, product identification
+	 * and product revision strings.
+	 */
+	//memset(dev->zbd_info.zbd_vendor_id, 0, ZBC_DEVICE_INFO_LENGTH);
+	memset(vid, 0, sizeof(vid));
+	memset(pid, 0, sizeof(pid));
+	memset(rev, 0, sizeof(rev));
+	sprintf(dev->zbd_info.zbd_vendor_id,
+		 "%s %s %s",
+		 zbc_scsi_str(vid, &buf[8], 8),
+		 zbc_scsi_str(pid, &buf[16], 16),
+		 zbc_scsi_str(rev, &buf[32], 4));
 
 	/* Now check the device type */
 	dev_type = (int)(buf[0] & 0x1f);
@@ -308,7 +337,7 @@ static int zbc_scsi_do_report_zones(struct zbc_device *dev, uint64_t sector,
 		bufsz = max_bufsz;
 
 	/* Allocate and intialize report zones command */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_REPORT_ZONES, NULL, bufsz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_REPORT_ZONES, NULL, bufsz);
 	if (ret != 0)
 		return ret;
 
@@ -525,7 +554,7 @@ int zbc_scsi_zone_op(struct zbc_device *dev, uint64_t sector,
 	}
 
 	/* Allocate and intialize zone command */
-	ret = zbc_sg_cmd_init(&cmd, cmdid, NULL, 0);
+	ret = zbc_sg_cmd_init(dev, &cmd, cmdid, NULL, 0);
 	if (ret != 0)
 		return ret;
 
@@ -582,7 +611,7 @@ static int zbc_scsi_get_capacity(struct zbc_device *dev)
 	int ret;
 
 	/* READ CAPACITY 16 */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_READ_CAPACITY,
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_READ_CAPACITY,
 			      NULL, ZBC_SCSI_READ_CAPACITY_BUF_LEN);
 	if (ret != 0)
 		return ret;
@@ -602,7 +631,7 @@ static int zbc_scsi_get_capacity(struct zbc_device *dev)
 	if (dev->zbd_info.zbd_lblock_size == 0) {
 		zbc_error("%s: invalid logical sector size\n",
 			  dev->zbd_filename);
-		ret = -EINVAL;
+		ret = -EIO;
 		goto out;
 	}
 
@@ -624,7 +653,7 @@ static int zbc_scsi_get_capacity(struct zbc_device *dev)
 			 * To get the entire device capacity, we need to get
 			 * the last LBA of the last zone of the device.
 			 */
-			ret = zbc_scsi_do_report_zones(dev, 0, ZBC_RO_ALL,
+			ret = zbc_scsi_do_report_zones(dev, 0, ZBC_RO_ALL|ZBC_RO_PARTIAL,
 						       &max_lba,
 						       NULL, &nr_zones);
 			if (ret != 0)
@@ -652,7 +681,7 @@ static int zbc_scsi_get_capacity(struct zbc_device *dev)
 	if (!dev->zbd_info.zbd_lblocks) {
 		zbc_error("%s: invalid capacity (logical blocks)\n",
 			  dev->zbd_filename);
-		ret = -EINVAL;
+		ret = -EIO;
 		goto out;
 	}
 
@@ -679,6 +708,7 @@ out:
 int zbc_scsi_get_zbd_characteristics(struct zbc_device *dev)
 {
 	uint8_t buf[ZBC_SCSI_VPD_PAGE_B6_LEN];
+	uint32_t val;
 	int ret;
 
 	if (!zbc_dev_is_zoned(dev))
@@ -694,20 +724,46 @@ int zbc_scsi_get_zbd_characteristics(struct zbc_device *dev)
 	/* URSWRZ (unrestricted read in sequential write required zone) flag */
 	dev->zbd_info.zbd_flags |= (buf[4] & 0x01) ? ZBC_UNRESTRICTED_READ : 0;
 
-	/* Resource of handling zones */
-	dev->zbd_info.zbd_opt_nr_open_seq_pref =
-		zbc_sg_get_int32(&buf[8]);
-	dev->zbd_info.zbd_opt_nr_non_seq_write_seq_pref =
-		zbc_sg_get_int32(&buf[12]);
-	dev->zbd_info.zbd_max_nr_open_seq_req =
-		zbc_sg_get_int32(&buf[16]);
+	/* Maximum number of zones for resource management */
+	if (dev->zbd_info.zbd_model == ZBC_DM_HOST_AWARE) {
 
-	if (dev->zbd_info.zbd_model == ZBC_DM_HOST_MANAGED &&
-	    dev->zbd_info.zbd_max_nr_open_seq_req <= 0) {
-		zbc_error("%s: invalid maximum number of open sequential "
-			  "write required zones for host-managed device\n",
-			  dev->zbd_filename);
-		return -EINVAL;
+		val = zbc_sg_get_int32(&buf[8]);
+		if (!val) {
+			/* Handle this case as "not reported" */
+			zbc_warning("%s: invalid optimal number of open "
+				    "sequential write preferred zones\n",
+				    dev->zbd_filename);
+			val = ZBC_NOT_REPORTED;
+		}
+		dev->zbd_info.zbd_opt_nr_open_seq_pref = val;
+
+		val = zbc_sg_get_int32(&buf[12]);
+		if (!val) {
+			/* Handle this case as "not reported" */
+			zbc_warning("%s: invalid optimal number of randomly "
+				    "writen sequential write preferred zones\n",
+				    dev->zbd_filename);
+			val = ZBC_NOT_REPORTED;
+		}
+		dev->zbd_info.zbd_opt_nr_non_seq_write_seq_pref = val;
+
+		dev->zbd_info.zbd_max_nr_open_seq_req = 0;
+
+	} else {
+
+		dev->zbd_info.zbd_opt_nr_open_seq_pref = 0;
+		dev->zbd_info.zbd_opt_nr_non_seq_write_seq_pref = 0;
+
+		val = zbc_sg_get_int32(&buf[16]);
+		if (!val) {
+			/* Handle this case as "no limit" */
+			zbc_warning("%s: invalid maximum number of open "
+				    "sequential write required zones\n",
+				    dev->zbd_filename);
+			val = ZBC_NO_LIMIT;
+		}
+		dev->zbd_info.zbd_max_nr_open_seq_req = val;
+
 	}
 
 	return 0;
@@ -790,8 +846,11 @@ static int zbc_scsi_open(const char *filename,
 	dev->zbd_fd = fd;
 	dev->zbd_sg_fd = fd;
 #ifdef HAVE_DEVTEST
-	dev->zbd_flags = flags & ZBC_O_DEVTEST;
+	dev->zbd_o_flags = flags & ZBC_O_DEVTEST;
 #endif
+	if (flags & O_DIRECT)
+		dev->zbd_o_flags |= ZBC_O_DIRECT;
+
 	dev->zbd_filename = strdup(filename);
 	if (!dev->zbd_filename)
 		goto out_free_dev;
@@ -850,7 +909,7 @@ ssize_t zbc_scsi_pread(struct zbc_device *dev, void *buf,
 	ssize_t ret;
 
 	/* READ 16 */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_READ, buf, sz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_READ, buf, sz);
 	if (ret != 0)
 		return ret;
 
@@ -881,7 +940,7 @@ ssize_t zbc_scsi_pwrite(struct zbc_device *dev, const void *buf,
 	ssize_t ret;
 
 	/* WRITE 16 */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_WRITE, (uint8_t *)buf, sz);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_WRITE, (uint8_t *)buf, sz);
 	if (ret != 0)
 		return ret;
 
@@ -910,7 +969,7 @@ int zbc_scsi_flush(struct zbc_device *dev)
 	int ret;
 
 	/* SYNCHRONIZE CACHE 16 */
-	ret = zbc_sg_cmd_init(&cmd, ZBC_SG_SYNC_CACHE, NULL, 0);
+	ret = zbc_sg_cmd_init(dev, &cmd, ZBC_SG_SYNC_CACHE, NULL, 0);
 	if (ret != 0)
 		return ret;
 

@@ -12,7 +12,7 @@
 # with libzbc. If not, see  <http://opensource.org/licenses/BSD-2-Clause>.
 #
 
-. ../zbc_test_lib.sh
+. scripts/zbc_test_lib.sh
 
 zbc_test_init $0 "WRITE sequential zone boundary violation" $*
 
@@ -33,14 +33,14 @@ fi
 zbc_test_get_zone_info
 
 # Search target LBA
-zbc_test_search_vals_from_zone_type_and_ignored_cond ${zone_type} "0xe"
+zbc_test_get_target_zone_from_type_and_cond ${zone_type} "${ZC_EMPTY}"
 
 # Start testing
-nio=$(( (${target_size} - 7) / 8 ))
-zbc_test_run ${bin_path}/zbc_test_write_zone -v -n ${nio} ${device} ${target_slba} 8
+nio=$(( (target_size / lblk_per_pblk) - 1))
+zbc_test_run ${bin_path}/zbc_test_write_zone -v -n ${nio} ${device} ${target_slba} ${lblk_per_pblk}
 if [ $? -eq 0 ]; then
-    target_lba=$(( ${target_slba} + ${nio} * 8 ))
-    zbc_test_run ${bin_path}/zbc_test_write_zone -v ${device} ${target_lba} 16
+    target_lba=$(( target_slba + nio * lblk_per_pblk ))
+    zbc_test_run ${bin_path}/zbc_test_write_zone -v ${device} ${target_lba} $((lblk_per_pblk * 2))
 fi
 
 # Check result
